@@ -40,148 +40,112 @@
  */
 package com.mycompany.app;
 
+import org.apache.commons.io.IOUtils;
 import org.graalvm.polyglot.Context;
-import org.graalvm.polyglot.Value;
-import javax.script.ScriptEngineManager;
-import javax.script.ScriptEngine;
-import javax.script.Invocable;
-import java.io.IOException;
 import org.graalvm.polyglot.Source;
+import org.graalvm.polyglot.Value;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.Charset;
+import java.nio.file.Path;
+import java.util.Scanner;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Simple benchmark for Graal.js via GraalVM Polyglot Context and ScriptEngine.
  */
 public class App {
 
-    public static final int WARMUP = 15;
-    public static final int ITERATIONS = 10;
-    public static final String BENCHFILE = "src/bench.js";
-
-    public static final String SOURCE = ""
-            + "var N = 2000;\n"
-            + "var EXPECTED = 17393;\n"
-            + "\n"
-            + "function Natural() {\n"
-            + "    x = 2;\n"
-            + "    return {\n"
-            + "        'next' : function() { return x++; }\n"
-            + "    };\n"
-            + "}\n"
-            + "\n"
-            + "function Filter(number, filter) {\n"
-            + "    var self = this;\n"
-            + "    this.number = number;\n"
-            + "    this.filter = filter;\n"
-            + "    this.accept = function(n) {\n"
-            + "      var filter = self;\n"
-            + "      for (;;) {\n"
-            + "          if (n % filter.number === 0) {\n"
-            + "              return false;\n"
-            + "          }\n"
-            + "          filter = filter.filter;\n"
-            + "          if (filter === null) {\n"
-            + "              break;\n"
-            + "          }\n"
-            + "      }\n"
-            + "      return true;\n"
-            + "    };\n"
-            + "    return this;\n"
-            + "}\n"
-            + "\n"
-            + "function Primes(natural) {\n"
-            + "    var self = this;\n"
-            + "    this.natural = natural;\n"
-            + "    this.filter = null;\n"
-            + "\n"
-            + "    this.next = function() {\n"
-            + "        for (;;) {\n"
-            + "            var n = self.natural.next();\n"
-            + "            if (self.filter === null || self.filter.accept(n)) {\n"
-            + "                self.filter = new Filter(n, self.filter);\n"
-            + "                return n;\n"
-            + "            }\n"
-            + "        }\n"
-            + "    };\n"
-            + "}\n"
-            + "\n"
-            + "function primesMain() {\n"
-            + "    var primes = new Primes(Natural());\n"
-            + "    var primArray = [];\n"
-            + "    for (var i=0;i<=N;i++) { primArray.push(primes.next()); }\n"
-            + "    if (primArray[N] != EXPECTED) { throw new Error('wrong prime found: '+primArray[N]); }\n"
-            + "}\n";
+    public static final String LANG = "js";
 
     public static void main(String[] args) throws Exception {
-        benchGraalPolyglotContext();
-        benchGraalScriptEngine();
-        benchNashornScriptEngine();
+        String sourceName = "/js/handleEvent.js";
+        String handleEventSource = loadResource(sourceName);
+
+        Config.init(args);
+        Config.print();
+
+        Logger.println(Logger.Level.INFO, "Press <Enter> to begin");
+        Scanner scanner = new Scanner(System.in);
+        scanner.nextLine();
+
+        ExecutorService executorService = Executors.newFixedThreadPool(10);
+        int iterations = 10000;
+        CountDownLatch countDownLatch = new CountDownLatch(iterations);
+
+        long start = System.currentTimeMillis();
+        for (int i = 0; i < iterations; i++) {
+            int index = i;
+            executorService.execute(() -> {
+                try {
+                    run(sourceName, handleEventSource, index);
+                } catch (Exception ex) {
+                    Logger.print("run() failed", ex);
+                }
+                countDownLatch.countDown();
+            });
+        }
+
+        countDownLatch.await(5, TimeUnit.MINUTES);
+        Logger.printf(Logger.Level.INFO, "Done.  Took %d ms.", System.currentTimeMillis() - start);
+        scanner.nextLine();
+        ContextPool.stop();
+        System.exit(0);
     }
 
-    static long benchGraalPolyglotContext() throws IOException {
-        System.out.println("=== Graal.js via org.graalvm.polyglot.Context === ");
-        long sum = 0;
-        try (Context context = Context.create()) {
-            context.eval(Source.newBuilder("js", SOURCE, "src.js").build());
-            Value primesMain = context.getBindings("js").getMember("primesMain");
-            System.out.println("warming up ...");
-            for (int i = 0; i < WARMUP; i++) {
-                primesMain.execute();
+    static String loadResource(String location) throws IOException {
+        try (InputStream stream = App.class.getResourceAsStream(location)) {
+            if (stream == null) {
+                throw new IOException("Resource [" + location + "] not found");
             }
-            System.out.println("warmup finished, now measuring");
-            for (int i = 0; i < ITERATIONS; i++) {
-                long start = System.currentTimeMillis();
-                primesMain.execute();
-                long took = System.currentTimeMillis() - start;
-                sum += took;
-                System.out.println("iteration: " + took);
-            }
-        } // context.close() is automatic
-        return sum;
-    }
-
-    static long benchNashornScriptEngine() throws IOException {
-        System.out.println("=== Nashorn via javax.script.ScriptEngine ===");
-        ScriptEngine nashornEngine = new ScriptEngineManager().getEngineByName("nashorn");
-        if (nashornEngine == null) {
-            System.out.println("*** Nashorn not found ***");
-            return 0;
-        } else {
-            return benchScriptEngineIntl(nashornEngine);
+            return IOUtils.toString(stream, Charset.defaultCharset());
         }
     }
 
-    static long benchGraalScriptEngine() throws IOException {
-        System.out.println("=== Graal.js via javax.script.ScriptEngine ===");
-        ScriptEngine graaljsEngine = new ScriptEngineManager().getEngineByName("graal.js");
-        if (graaljsEngine == null) {
-            System.out.println("*** Graal.js not found ***");
-            return 0;
-        } else {
-            return benchScriptEngineIntl(graaljsEngine);
-        }
+    static Source loadSource(String location) throws IOException {
+        String contents = loadResource(location);
+        return Source.newBuilder(LANG, contents, location).cached(false).internal(true).buildLiteral();
     }
 
-    private static long benchScriptEngineIntl(ScriptEngine eng) throws IOException {
-        long sum = 0L;
+    static void run(String sourceName,
+                    String handleEventSource,
+                    int index) throws IOException {
+        Source jvmNpmSource = loadSource("/js/jvm-npm.js");
+
+        Context context = ContextPool.borrow();
         try {
-            eng.eval(SOURCE);
-            Invocable inv = (Invocable) eng;
-            System.out.println("warming up ...");
-            for (int i = 0; i < WARMUP; i++) {
-                inv.invokeFunction("primesMain");
-            }
-            System.out.println("warmup finished, now measuring");
-            for (int i = 0; i < ITERATIONS; i++) {
-                long start = System.currentTimeMillis();
-                inv.invokeFunction("primesMain");
-                long took = System.currentTimeMillis() - start;
-                sum += took;
-                System.out.println("iteration: " + (took));
-            }
-        } catch (Exception ex) {
-            System.out.println(ex);
-        }
-        return sum;
-    }
+            context.enter();
 
+            /* Mirror GraalEngine.java */
+            Value bindings = context.getBindings(LANG);
+
+            String rootDirectory = Path.of(".").toAbsolutePath().toString();
+            ModuleIO io = new ModuleIO(rootDirectory);
+
+            GraalSourceLoadFunction loader = new GraalSourceLoadFunction(context);
+
+            bindings.putMember("load", loader);
+            bindings.putMember("io", io);
+
+            Value jvmNPM = context.eval(jvmNpmSource);
+            jvmNPM.getMember("createRoot").execute(io);
+            bindings.putMember("runtime", jvmNPM);
+
+            /* Mirror GraalContext.java */
+            Value loadFunction = bindings.getMember("runtime").getMember("_loadScript");
+            Value entryPoint = loadFunction.execute(sourceName, handleEventSource);
+
+            /* Mirror JsExecutor.java */
+            Value jsFunction = entryPoint.getMember("handleEvent");
+            Value result = jsFunction.execute("index_" + index);
+            Logger.println(Logger.Level.DEBUG, "Result: " + result.asString());
+        } finally {
+            context.leave();
+            ContextPool.release(context);
+        }
+    }
 }
